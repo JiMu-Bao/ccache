@@ -1,4 +1,4 @@
-// Copyright (C) 2019-2020 Joel Rosdahl and other contributors
+// Copyright (C) 2019-2021 Joel Rosdahl and other contributors
 //
 // See doc/AUTHORS.adoc for a complete list of contributors.
 //
@@ -27,14 +27,20 @@
 #include "Manifest.hpp"
 #include "Result.hpp"
 #include "Statistics.hpp"
-#include "StdMakeUnique.hpp"
 #include "ThreadPool.hpp"
 #include "ZstdCompressor.hpp"
 #include "assertions.hpp"
 #include "fmtmacros.hpp"
 
+#include <core/wincompat.hpp>
+
 #include "third_party/fmt/core.h"
 
+#ifdef HAVE_UNISTD_H
+#  include <unistd.h>
+#endif
+
+#include <memory>
 #include <string>
 #include <thread>
 
@@ -180,7 +186,7 @@ recompress_file(RecompressionStatistics& statistics,
                   level ? Compression::Type::zstd : Compression::Type::none,
                   wanted_level);
 
-  char buffer[READ_BUFFER_SIZE];
+  char buffer[CCACHE_READ_BUFFER_SIZE];
   size_t bytes_left = reader->payload_size();
   while (bytes_left > 0) {
     size_t bytes_to_read = std::min(bytes_left, sizeof(buffer));
@@ -196,7 +202,7 @@ recompress_file(RecompressionStatistics& statistics,
   atomic_new_file.commit();
   auto new_stat = Stat::stat(cache_file.path(), Stat::OnError::log);
 
-  Statistics::update(stats_file, [=](Counters& cs) {
+  Statistics::update(stats_file, [=](auto& cs) {
     cs.increment(Statistic::cache_size_kibibyte,
                  Util::size_change_kibibyte(old_stat, new_stat));
   });
@@ -219,8 +225,7 @@ compress_stats(const Config& config,
 
   Util::for_each_level_1_subdir(
     config.cache_dir(),
-    [&](const std::string& subdir,
-        const Util::ProgressReceiver& sub_progress_receiver) {
+    [&](const auto& subdir, const auto& sub_progress_receiver) {
       const std::vector<CacheFile> files = Util::get_level_1_files(
         subdir, [&](double progress) { sub_progress_receiver(progress / 2); });
 
@@ -285,8 +290,7 @@ compress_recompress(Context& ctx,
 
   Util::for_each_level_1_subdir(
     ctx.config.cache_dir(),
-    [&](const std::string& subdir,
-        const Util::ProgressReceiver& sub_progress_receiver) {
+    [&](const auto& subdir, const auto& sub_progress_receiver) {
       std::vector<CacheFile> files =
         Util::get_level_1_files(subdir, [&](double progress) {
           sub_progress_receiver(0.1 * progress);

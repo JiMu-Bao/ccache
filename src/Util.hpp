@@ -1,4 +1,4 @@
-// Copyright (C) 2019-2020 Joel Rosdahl and other contributors
+// Copyright (C) 2019-2021 Joel Rosdahl and other contributors
 //
 // See doc/AUTHORS.adoc for a complete list of contributors.
 //
@@ -18,14 +18,15 @@
 
 #pragma once
 
-#include "system.hpp"
-
 #include "CacheFile.hpp"
+
+#include <util/Tokenizer.hpp>
 
 #include "third_party/nonstd/optional.hpp"
 #include "third_party/nonstd/string_view.hpp"
 
 #include <algorithm>
+#include <cstdint>
 #include <functional>
 #include <ios>
 #include <memory>
@@ -265,9 +266,6 @@ int_to_big_endian(int8_t value, uint8_t* buffer)
   buffer[0] = value;
 }
 
-// Return whether `path` is absolute.
-bool is_absolute_path(nonstd::string_view path);
-
 // Test if a file is on nfs.
 //
 // Sets is_nfs to the result if fstatfs is available and no error occurred.
@@ -286,18 +284,6 @@ is_dir_separator(char ch)
          || ch == '\\'
 #endif
     ;
-}
-
-// Return whether `path` is a full path.
-inline bool
-is_full_path(nonstd::string_view path)
-{
-#ifdef _WIN32
-  if (path.find('\\') != nonstd::string_view::npos) {
-    return true;
-  }
-#endif
-  return path.find('/') != nonstd::string_view::npos;
 }
 
 // Return whether `path` represents a precompiled header (see "Precompiled
@@ -354,14 +340,15 @@ uint64_t parse_size(const std::string& value);
 
 // Parse a string into an unsigned integer.
 //
-// Throws `Error` if `value` cannot be parsed as an uint64_t or if the value
-// falls out of the range [`min_value`, `max_value`]. `min_value` and
-// `max_value` default to min and max values of uint64_t. `description` is
-// included in the error message for range violations.
+// Throws `Error` if `value` cannot be parsed as an uint64_t with base `base`,
+// or if the value falls out of the range [`min_value`, `max_value`].
+// `min_value` and `max_value` default to min and max values of uint64_t.
+// `description` is included in the error message for range violations.
 uint64_t parse_unsigned(const std::string& value,
                         nonstd::optional<uint64_t> min_value = nonstd::nullopt,
                         nonstd::optional<uint64_t> max_value = nonstd::nullopt,
-                        nonstd::string_view description = "integer");
+                        nonstd::string_view description = "integer",
+                        int base = 10);
 
 // Read data from `fd` until end of file and call `data_receiver` with the read
 // data. Returns whether reading was successful, i.e. whether the read(2) call
@@ -420,15 +407,19 @@ size_change_kibibyte(const Stat& old_stat, const Stat& new_stat)
          / 1024;
 }
 
-// Split `input` into words at any of the characters listed in `separators`.
-// These words are a view into `input`; empty words are omitted. `separators`
-// must neither be the empty string nor a nullptr.
-std::vector<nonstd::string_view> split_into_views(nonstd::string_view input,
-                                                  const char* separators);
+// Split `string` into tokens at any of the characters in `separators`. These
+// tokens are views into `string`. `separators` must neither be the empty string
+// nor a nullptr.
+std::vector<nonstd::string_view> split_into_views(
+  nonstd::string_view string,
+  const char* separators,
+  util::Tokenizer::Mode mode = util::Tokenizer::Mode::skip_empty);
 
-// Same as `split_into_views` but the words are copied from `input`.
-std::vector<std::string> split_into_strings(nonstd::string_view input,
-                                            const char* separators);
+// Same as `split_into_views` but the tokens are copied from `string`.
+std::vector<std::string> split_into_strings(
+  nonstd::string_view string,
+  const char* separators,
+  util::Tokenizer::Mode mode = util::Tokenizer::Mode::skip_empty);
 
 // Return true if `prefix` is a prefix of `string`.
 inline bool
@@ -463,8 +454,8 @@ void traverse(const std::string& path, const TraverseVisitor& visitor);
 
 // Remove `path` (non-directory), NFS safe. Logs according to `unlink_log`.
 //
-// Returns whether removal was successful. A nonexistent `path` is considered
-// successful.
+// Returns whether removal was successful. A nonexistent `path` is considered a
+// failure.
 bool unlink_safe(const std::string& path,
                  UnlinkLog unlink_log = UnlinkLog::log_failure);
 

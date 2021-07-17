@@ -26,6 +26,12 @@
 #include "fmtmacros.hpp"
 #include "language.hpp"
 
+#include <core/wincompat.hpp>
+
+#ifdef HAVE_UNISTD_H
+#  include <unistd.h>
+#endif
+
 #include <cassert>
 
 using nonstd::nullopt;
@@ -46,6 +52,7 @@ struct ArgumentProcessingState
   ColorDiagnostics color_diagnostics = ColorDiagnostics::automatic;
   bool found_directives_only = false;
   bool found_rewrite_includes = false;
+  nonstd::optional<std::string> found_xarch_arch;
 
   std::string explicit_language;    // As specified with -x.
   std::string input_charset_option; // -finput-charset=...
@@ -93,7 +100,8 @@ bool
 color_output_possible()
 {
   const char* term_env = getenv("TERM");
-  return isatty(STDERR_FILENO) && term_env && strcasecmp(term_env, "DUMB") != 0;
+  return isatty(STDERR_FILENO) && term_env
+         && Util::to_lowercase(term_env) != "dumb";
 }
 
 bool
@@ -232,6 +240,15 @@ process_arg(Context& ctx,
     return nullopt;
   }
 
+  // Ignore clang -ivfsoverlay <arg> to not detect multiple input files.
+  if (args[i] == "-ivfsoverlay"
+      && !(config.sloppiness() & SLOPPY_IVFSOVERLAY)) {
+    LOG_RAW(
+      "You have to specify \"ivfsoverlay\" sloppiness when using"
+      " -ivfsoverlay to get hits");
+    return Statistic::unsupported_compiler_option;
+  }
+
   // Special case for -E.
   if (args[i] == "-E") {
     return Statistic::called_for_preprocessing;
@@ -294,8 +311,20 @@ process_arg(Context& ctx,
 
   // -Xarch_* options are too hard.
   if (Util::starts_with(args[i], "-Xarch_")) {
-    LOG("Unsupported compiler option: {}", args[i]);
-    return Statistic::unsupported_compiler_option;
+    if (i == args.size() - 1) {
+      LOG("Missing argument to {}", args[i]);
+      return Statistic::bad_compiler_arguments;
+    }
+    const auto arch = args[i].substr(7);
+    if (!state.found_xarch_arch) {
+      state.found_xarch_arch = arch;
+    } else if (*state.found_xarch_arch != arch) {
+      LOG_RAW("Multiple different -Xarch_* options not supported");
+      return Statistic::unsupported_compiler_option;
+    }
+    state.common_args.push_back(args[i]);
+    state.common_args.push_back(args[i + 1]);
+    return nullopt;
   }
 
   // Handle -arch options.
@@ -618,13 +647,19 @@ process_arg(Context& ctx,
     return nullopt;
   }
 
+  if (args[i] == "-P" || args[i] == "-Wp,-P") {
+    // Avoid passing -P to the preprocessor since it removes preprocessor
+    // information we need.
+    state.compiler_only_args.push_back(args[i]);
+    LOG("{} used; not compiling preprocessed code", args[i]);
+    config.set_run_second_cpp(true);
+    return nullopt;
+  }
+
   if (Util::starts_with(args[i], "-Wp,")) {
-    if (args[i] == "-Wp,-P" || args[i].find(",-P,") != std::string::npos
+    if (args[i].find(",-P,") != std::string::npos
         || Util::ends_with(args[i], ",-P")) {
-      // -P removes preprocessor information in such a way that the object file
-      // from compiling the preprocessed file will not be equal to the object
-      // file produced when compiling without ccache.
-      LOG_RAW("Too hard option -Wp,-P detected");
+      // -P together with other preprocessor options is just too hard.
       return Statistic::unsupported_compiler_option;
     } else if (Util::starts_with(args[i], "-Wp,-MD,")
                && args[i].find(',', 8) == std::string::npos) {
@@ -1107,7 +1142,14 @@ process_args(Context& ctx)
   }
 
   if (args_info.seen_split_dwarf) {
-    args_info.output_dwo = Util::change_extension(args_info.output_obj, ".dwo");
+    if (args_info.output_obj == "/dev/null") {
+      // Outputting to /dev/null -> compiler won't write a .dwo, so just pretend
+      // we haven't seen the -gsplit-dwarf option.
+      args_info.seen_split_dwarf = false;
+    } else {
+      args_info.output_dwo =
+        Util::change_extension(args_info.output_obj, ".dwo");
+    }
   }
 
   // Cope with -o /dev/null.
@@ -1230,6 +1272,17 @@ process_args(Context& ctx)
 
   if (state.found_dc_opt) {
     compiler_args.push_back("-dc");
+  }
+
+  if (state.found_xarch_arch && !args_info.arch_args.empty()) {
+    if (args_info.arch_args.size() > 1) {
+      LOG_RAW(
+        "Multiple -arch options in combination with -Xarch_* not supported");
+      return Statistic::unsupported_compiler_option;
+    } else if (args_info.arch_args[0] != *state.found_xarch_arch) {
+      LOG_RAW("-arch option not matching -Xarch_* option not supported");
+      return Statistic::unsupported_compiler_option;
+    }
   }
 
   for (const auto& arch : args_info.arch_args) {
